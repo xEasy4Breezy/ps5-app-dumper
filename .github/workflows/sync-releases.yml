@@ -2,8 +2,8 @@ name: Sync EchoStretch Releases
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Checks automatically every day at midnight UTC
-  workflow_dispatch:     # Allows manual trigger at any time
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -26,42 +26,46 @@ jobs:
         run: |
           git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" || true
           git fetch upstream --tags
-          git push origin --tags || echo "Tags are already up to date"
+          git push origin --tags || true
 
       - name: Mirror Releases & Assets
         run: |
-          echo "Fetching releases in xEasy4Breezy/ps5-app-dumper..."
-          FORK_RELEASES=$(gh release list --limit 200 --json tagName -q '.[].tagName')
+          set -e
 
-          echo "Fetching releases from ${UPSTREAM_REPO}..."
-          UPSTREAM_TAGS=$(gh release list -R "${UPSTREAM_REPO}" --limit 100 --json tagName -q '.[].tagName')
+          echo "Target repo: $GITHUB_REPOSITORY"
+          echo "Upstream repo: $UPSTREAM_REPO"
+
+          # 1. Fetch tags that actually have full Releases in your fork
+          FORK_RELEASES=$(gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName -q '.[].tagName' || true)
+
+          # 2. Fetch tags from upstream releases
+          UPSTREAM_TAGS=$(gh release list -R "$UPSTREAM_REPO" --limit 100 --json tagName -q '.[].tagName')
 
           for tag in $UPSTREAM_TAGS; do
-            # Skip if already imported
             if echo "$FORK_RELEASES" | grep -qx "$tag"; then
-              echo "Release $tag already exists. Skipping."
+              echo "Release $tag already exists in $GITHUB_REPOSITORY. Skipping."
               continue
             fi
 
-            echo "=== Mirroring release: $tag ==="
+            echo "=== Syncing Release: $tag ==="
             TMP_DIR="release_assets_${tag}"
             mkdir -p "$TMP_DIR"
 
-            # Download compiled ELF / payload assets
-            echo "Downloading assets from upstream..."
-            gh release download "$tag" -R "${UPSTREAM_REPO}" -D "$TMP_DIR" || true
+            # Download assets from upstream
+            echo "Downloading assets from $UPSTREAM_REPO for tag $tag..."
+            gh release download "$tag" -R "$UPSTREAM_REPO" -D "$TMP_DIR" || echo "No downloadable assets found."
 
-            # Pull metadata
-            TITLE=$(gh release view "$tag" -R "${UPSTREAM_REPO}" --json name -q '.name')
-            IS_PRERELEASE=$(gh release view "$tag" -R "${UPSTREAM_REPO}" --json isPrerelease -q '.isPrerelease')
-            gh release view "$tag" -R "${UPSTREAM_REPO}" --json body -q '.body' > "$TMP_DIR/notes.md"
+            # Fetch metadata
+            TITLE=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json name -q '.name')
+            IS_PRERELEASE=$(gh release view "$tag" -R "$UPSTREAM_REPO" --json isPrerelease -q '.isPrerelease')
+            gh release view "$tag" -R "$UPSTREAM_REPO" --json body -q '.body' > "$TMP_DIR/notes.md"
 
             FLAGS=()
             if [ "$IS_PRERELEASE" = "true" ]; then
               FLAGS+=(--prerelease)
             fi
 
-            # Collect binaries/payloads to re-upload
+            # Collect files to upload (excluding notes.md)
             ASSETS=()
             for file in "$TMP_DIR"/*; do
               if [ -f "$file" ] && [ "$(basename "$file")" != "notes.md" ]; then
@@ -69,12 +73,16 @@ jobs:
               fi
             done
 
-            echo "Creating release on xEasy4Breezy/ps5-app-dumper..."
+            echo "Publishing release $tag to $GITHUB_REPOSITORY with ${#ASSETS[@]} asset(s)..."
+            
+            # Create release targeting your repository explicitly
             gh release create "$tag" \
+              -R "$GITHUB_REPOSITORY" \
               --title "${TITLE:-$tag}" \
               --notes-file "$TMP_DIR/notes.md" \
               "${FLAGS[@]}" \
-              "${ASSETS[@]}" || echo "Failed to push release $tag"
+              "${ASSETS[@]}"
 
             rm -rf "$TMP_DIR"
+            echo "Successfully mirrored $tag"
           done
